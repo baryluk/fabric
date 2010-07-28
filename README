@@ -44,7 +44,7 @@ How to use it?
 
       PingServer = fabric:remote_whereis(ping).
 
-  - now you can use PingServer a Pid of any Erlang process.
+  - now you can use PingServer as pid, as any other pid of any other Erlang process.
 
       Sender = self().
       PingServer ! {Sender, {payload,"abababa"}}.
@@ -53,6 +53,7 @@ How to use it?
   - use PingServer to anything you wish, you can send to it antyhing
     (including any other Pids),     it will answer you back. You can
     tell it to answer to somebody else, or itself...
+    You can try killing it... Or link to it... Or monitor it...
 
 How it works?
 
