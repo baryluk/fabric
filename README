@@ -1,0 +1,131 @@
+A fabric is a small client-server mechanism for Erlang, which allows
+two (or more) Erlang nodes to connect via the TCP, and allow
+forwarding of messages.
+
+As such it doesn't really differ from normal Erlang Distributed Protocol,
+but fabric is much better for less secure environments, when there are
+conectivity problems, when encryption is needs, when there are bigger latency,
+or when only small subset of funcionality is needed.
+
+How to use it?
+
+  - Suppose you have simple ping server on server side
+      start_ping() ->
+          register(spawn(fun loop/0), ping).
+      loop() ->
+          receive
+             {From, M} -> From ! {self(), {pong, M}}, loop()
+          end.
+
+  - This server should transparenntly work for local (inter-cluster)
+    process, even on other nodes, but in single network.
+
+  - start it:
+      start_ping().
+
+  - start fabric server:
+      fabric:start_server(Port, "secret").
+
+  - thats all on server side.
+
+  - basically everything you need to do on second side is connect once
+      ok = fabric:connect(IP, Port, "secret").
+      (it will connect, do reconnections, proper authentification, encryption if needed)
+
+  - then you need to discover Pid of ping server:
+      PingServer = fabric:remote_whereis(ping).
+
+  - now you can use PingServer a Pid of any Erlang process.
+      Sender = self().
+      PingServer ! {Sender, {payload,"abababa"}}.
+      receive {PingServer, M} -> io:format("received back: ~p~n", [M]) end.
+
+How it works?
+
+   PingServer is really a local process, which sends a message to the 'fabric' manager,
+   it performs Pid translation (here for PingServer as a destination, and a Self as part of message),
+   and sends it to second side, on remote side, Pid translation comes again, to discover where really to send
+   message, and how to reconstruct pids inside of the message. In our case, Sender will be somethine new,
+   and new proxy server will be created on server SenderProxy, then 'fabric' manager on server side will,
+   send message to ping process, which will answer back to SenderProxy, which will perform the same operations,
+   to forward it back.
+
+   One can transparently use both local and remote pid, and they will be properly encoded in transit.
+
+   One must be carefull about usage of atoms, as normally [safe] option is enabled, which will
+   prevent from decoding some values - new atoms, funs, new references. Still transporting references,
+   should work. All other sane types should work and be quite efficient. Port translation
+   is not yet done, but in principle is same as Pid translation.
+
+   Proxy processes will stay alive, even if connection will be lost, as it is possible that
+   connection will be established again, and we want still to once discovered Pids to still
+   refere to the same living process on remote side.
+
+   Proxy server will also emulate crashes of remote processes. So you can use all normal
+   primitives, like exit/1,2, link/1,2, monitor/2, demonitor, process_flag(trap_exit, true/false).
+   In such cases when it make sens it will end it's execution (for example when it knows
+   that remote process it represents is dead).
+
+Is this safe?
+
+   Most obvious problem with normal Erlang distributed protocol, is that it is easly to obtain list of all
+   processes, and send antything to any process, especially given that registered processes are easy to find.
+   For example sending to kernel, init or rpc process can make a real disaster.
+
+   For this reason in fabric:remote_whereis, one can use only allowed atoms.
+
+   Still if one of this process will forward other Pids back to clients, they can communicate with them.
+
+   In future, there can be some additional blacklists in fabric manager, which will ensure that
+   no message are send directly to any critical system processes, or are not registered according to some scheme.
+
+What we are working now?
+
+   - Limit the number of the proxy processes the both sides.
+
+   - Flow control.
+
+   - Testing. Espcially monitor/link/kill/signals, etc.
+
+
+What is missing?
+
+   - Encryption
+
+       Probably best to use SSL with server certificate.
+
+       For private usage, also password authentification will suffice for a while.
+
+       Long term - certificates on both sides, or SRP-style authorization.
+
+   - Communication beetwen multiple clients.
+
+              C1 ---- Server ---- C2
+
+        It should be easly possible to communicate C1 with C2, and mix any Pids in messages and send operations,
+        scalability of such setup must also be inspected. Also behaviour what to do when C2 disconnects,
+        but on C1 we have proxy processes for it. It should be more aggressive than in case of Server,
+        because there can be very big number of clients, and Pids it send can be unsafe
+        (imagine there is a 100 clients C2 ... C101, and they sends big number of Pids to C1).
+
+        There should be also ways to learn connected clients to any clients (confiugrable),
+        and perform remote_whereis from C1 on C2, for some allowed registered processes.
+
+  - Allowing to run multiple servers on the Erlang cluster to make it more scalable.
+
+       In should be possible to easly do:
+
+                C2 ----                            ---- C5
+                       \                          /
+                C1 --- Server1  ~~~~~~~~~  Server2 --- C4
+                       /                         \
+                C3 ----                           ---- C6
+
+             And transparently allow communication beetwen all clients.
+             Where "~~~" is a Erlang distribution protocol.
+
+       More than 2 server should also be easly possible. Also things like reconnection leading
+       to other server in the cluster, and scalability issues need to be inspected.
+
+
+   - Global registration support. Currently is not tested, not supported, but can be usefull.
