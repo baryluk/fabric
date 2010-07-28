@@ -1,5 +1,8 @@
 -module(fabric_auth).
 
+% Copyright: Witold Baryluk, 2010
+% License: Public Domain
+
 % for auth
 -export([make_challenge/2, make_response/3, is_response_correct/4]).
 

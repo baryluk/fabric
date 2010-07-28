@@ -1,5 +1,8 @@
 -module(fabric_example).
 
+% Copyright: Witold Baryluk, 2010
+% License: Public Domain
+
 % testing
 -export([start/0, start/1, loop/1]).
 

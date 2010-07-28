@@ -1,5 +1,8 @@
 -module(fabric).
 
+% Copyright: Witold Baryluk, 2010
+% License: BSD
+
 -export([start_server/0, start_client/1]).
 -export([start_server/2, start_client/3]).
 %-export([start_snd_rewrite/1]).
@@ -13,6 +16,20 @@
 
 % call to update code of fabric
 -export([update/0]).
+
+% call to stop fabric, disconnect, and terminate all relevant processes on both sides.
+-export([stop/0]).
+
+-export([remote_whereis/1, info/1]).
+
+%-define(debug(A,B), io:format(A,B)).
+-define(debug(A,B), void).
+
+%-define(info(A,B), io:format(A,B)).
+-define(info(A,B), void).
+
+-define(notice(A,B), io:format(A,B)).
+
 
 % server section
 
@@ -67,16 +84,16 @@ server_child_loop0(Socket, Secret) ->
 	receive
 		{tcp, Socket, Bin1} ->
 			{hello, Name} = _H = binary_to_term(Bin1, [safe]),
-%			io:format("~p~n", [_H]),
+			?debug("~p~n", [_H]),
 			{Challenge, _Verificator} = fabric_auth:make_challenge(Name, Secret),
 			C = {challenge, Challenge},
 			ok = gen_tcp:send(Socket, term_to_binary(C)),
-%			io:format("~p~n", [C]),
+			?debug("~p~n", [C]),
 			inet:setopts(Socket, [{active, once}]),
 			receive
 				{tcp, Socket, Bin2} ->
 					{response, Response} = _R = binary_to_term(Bin2, [safe]),
-%					io:format("~p~n", [_R]),
+					?debug("~p~n", [_R]),
 					case fabric_auth:is_response_correct(Challenge, Name, Response, Secret) of
 						true ->
 							ok = gen_tcp:send(Socket, term_to_binary({auth, success})),
@@ -136,16 +153,16 @@ client_loop0(Socket, Secret) ->
 	receive
 		{tcp, Socket, Bin1} ->
 			{challenge, Challenge} = _B1 = binary_to_term(Bin1, [safe]),
-%			io:format("~p~n", [_B1]),
+			?debug("~p~n", [_B1]),
 			Response = fabric_auth:make_response(Challenge, Name, Secret),
 			R = {response, Response},
 			ok = gen_tcp:send(Socket, term_to_binary(R)),
-%			io:format("~p~n", [R]),
+			?debug("~p~n", [R]),
 			inet:setopts(Socket, [{active, once}]),
 			receive
 				{tcp, Socket, Bin2} ->
 					AuthR = binary_to_term(Bin2, [safe]),
-%					io:format("~p~n", [AuthR]),
+					?debug("~p~n", [AuthR]),
 					case AuthR of
 						{auth, success} ->
 							inet:setopts(Socket, [{active, once}]),
@@ -180,7 +197,7 @@ loop(Socket, Proxies) ->
 		{tcp, Socket, Bin} ->
 			% it will be properly packed/unpacked due {packet,4}
 			Term = binary_to_term(Bin, []), % safe - is too much - atoms will not work
-%			io:format("Received: ~p~n", [Term]),
+			?debug("Received: ~p~n", [Term]),
 			case Term of
 				%{n, Token, Id} ->
 				%	loop(Socket, Proxies2);
@@ -196,7 +213,7 @@ loop(Socket, Proxies) ->
 					loop(Socket, Proxies);
 				{'DEAD', {pr, Id}, Info} ->
 					Pid = rcv_rewrite_pid_remote(Id),
-%					io:format("Remote process Id=~p dead - stoping proxy ~p wth reason ~p~n", [Id, Pid, Info]),
+					?debug("Remote process Id=~p dead - stoping proxy ~p wth reason ~p~n", [Id, Pid, Info]),
 					What = case Info of
 						noproc -> {return, normal};
 						_ -> {exit, Info}
@@ -216,7 +233,7 @@ loop(Socket, Proxies) ->
 		%	gen_tcp:send(Socket, Bin),
 		%	loop(Socket, Proxies);
 		{forward, ProxyPid, _ProxyToken, Term} ->  % used by proxy
-%			io:format("Sending: ~p to ~p~n", [Term, ProxyPid]),
+			?debug("Sending: ~p to ~p~n", [Term, ProxyPid]),
 			Bin = encode_send(ProxyPid, Term),
 			ok = gen_tcp:send(Socket, Bin),
 			loop(Socket, Proxies);
@@ -240,7 +257,7 @@ loop(Socket, Proxies) ->
 						fabric_rpc_reply(From, Ref, ok),
 						exit(crash);
 					code_update ->
-						io:format("Reentering loop using fqdn for code update~n"),
+						?info("Reentering loop using fqdn for code update~n", []),
 						fabric_rpc_reply(From, Ref, ok),
 						?MODULE:code_update(Socket, Proxies);
 					%{map_request, From, Dest} when is_pid(Dest) ->
@@ -255,38 +272,39 @@ loop(Socket, Proxies) ->
 					%	loop(Socket, Proxies);
 					_ ->
 						undefined, % just make client timeout with exception
-						loop(Socket, Proxies);
+						loop(Socket, Proxies)
 			end;
 		{'EXIT', Pid, Why} ->
-			io:format("Received exit signal 'EXIT' ~p ~p~n", [Pid, Why]),
+			?debug("Received exit signal 'EXIT' ~p ~p~n", [Pid, Why]),
 			% remove from dictionary
 			% propagate signal to the remote side if needed (link or monitor)
 			loop(Socket, Proxies);
 		{'DOWN', MonitorRef, process, Pid, Info} ->
-%			io:format("Received monitor message 'DOWN' ~p ~p~n", [Pid, Info]),
+			?debug("Received monitor message 'DOWN' ~p ~p~n", [Pid, Info]),
 			% it can be one of our proxy processes or one of 
 			case get({monitor, MonitorRef}) of
 				{local, Id1} ->
-%					io:format(" - local process Id=~p~n", [Id1]),
+					?debug(" - local process Id=~p~n", [Id1]),
 					{pl, _Id2} = snd_rewrite_pid(Pid),
 					Meta = {'DEAD', {pr, Id1}, Info},
 					inet:setopts(Socket, [{active, once}]),
 					ok = gen_tcp:send(Socket, term_to_binary(Meta)),
 					loop(Socket, Proxies);
 				{remote, Id1} ->
-%					io:format(" - remote process Id=~p~n", [Id1]),
+					?debug(" - remote (proxy) process Id=~p~n", [Id1]),
+					% this is internal error, system limit/error, or somebody performed exit(Proxy, kill)
 					loop(Socket, Proxies);
 				undefined ->
 					throw(unknown_monitor)
 			end;
 		{tcp_error, Socket, Reason} ->
-			io:format("Connection error~n", []),
+			?info("Connection error~n", []),
 			exit({error, Reason});
 		{tcp_closed, Socket} ->
-			io:format("Connection closed~n", []),
+			?info("Connection closed~n", []),
 			exit(connection_closed);
 		Other ->
-			io:format("Unknown message received: ~p~n", [Other]),
+			?notice("Unknown message received: ~p~n", [Other]),
 			loop(Socket, Proxies)
 	end.
 
@@ -325,7 +343,7 @@ rcv_rewrite_pid_remote(DestProcessMapId) when is_integer(DestProcessMapId) ->
 rcv_process(DestProcessMapId, Msg) when is_integer(DestProcessMapId) ->
 	case rcv_rewrite_pid_local(DestProcessMapId) of
 		Pid when is_pid(Pid) ->
-%			io:format("Doing: ~p ! ~p~n", [Pid, Msg]),
+			?debug("Doing: ~p ! ~p~n", [Pid, Msg]),
 			Pid ! Msg;
 		_ ->
 			Msg
@@ -333,7 +351,7 @@ rcv_process(DestProcessMapId, Msg) when is_integer(DestProcessMapId) ->
 rcv_process({RegName, Node} = NR, Msg) when is_atom(Node), is_atom(RegName) ->
 	catch (NR ! Msg);
 rcv_process(RegName, Msg) when is_atom(RegName) ->
-%	io:format("Doing: ~p ! ~p~n", [RegName, Msg]),
+	?debug("Doing: ~p ! ~p~n", [RegName, Msg]),
 	case lists:member(RegName, allowed_registered_names()) of
 		true ->
 			catch (RegName ! Msg);
@@ -365,7 +383,7 @@ rcv_rewrite({pl, ProcessMapId}) when is_integer(ProcessMapId) ->
 		undefined ->
 			spawn(fun() -> dummy_dead_process end);
 		Other ->
-			io:format("Other1: ~p -> ~p~n", [{pl, ProcessMapId}, Other]),
+			?debug("Other1: ~p -> ~p~n", [{pl, ProcessMapId}, Other]),
 			throw(something_wrong1)
 	end;
 rcv_rewrite({pr, ProcessMapId}) when is_integer(ProcessMapId) ->
@@ -378,7 +396,7 @@ rcv_rewrite({pr, ProcessMapId}) when is_integer(ProcessMapId) ->
 			ProxyPid = create_new_proxy(ProcessMapId, FabricPid),
 			ProxyPid;
 		Other ->
-			io:format("Other2: ~p -> ~p~n", [{pr, ProcessMapId}, Other]),
+			?debug("Other2: ~p -> ~p~n", [{pr, ProcessMapId}, Other]),
 			throw(something_wrong2)
 	end;
 rcv_rewrite({f, _A, {}}) ->
@@ -393,8 +411,8 @@ rcv_rewrite(B) when is_binary(B) ->
 
 start_snd_rewrite(Msg) ->
 	Term = snd_rewrite(Msg),
-%	io:format("snd pre-encoded msg: ~p~n", [Msg]),
-%	io:format("snd post-encoded msg: ~p~n", [Term]),
+	?debug("snd pre-encoded msg: ~p~n", [Msg]),
+	?debug("snd post-encoded msg: ~p~n", [Term]),
 	Term.
 
 
@@ -499,18 +517,21 @@ fabric_rpc(Call) ->
 
 fabric_rpc_rcv_loop(Ref, Timeout) ->
 	receive
-		{rpc, Ref, Result} ->
+		{rpc_reply, Ref, Result} ->
 			%erlang:demonitor(Ref, [flush]),
 			Result;
 		%{'DOWN', Ref, _, _, Info} ->
 		%	throw ({crashed,Info});
-		{rpc, _, _OldResult} ->
+		{rpc_reply, _, _OldResult} ->
 			% TODO: we should update Timeout here to be smaller now
 			fabric_rpc_rcv_loop(Ref, Timeout)
 		after Timeout ->
 			throw (timeout)
 	end.
 
+
+fabric_rpc_reply(From, Ref, Result) ->
+	From ! {rpc_reply, Ref, Result}.
 
 %proxies() ->
 %	fabric ! {get_proxies, self()},
@@ -524,7 +545,7 @@ fabric_rpc_rcv_loop(Ref, Timeout) ->
 create_new_proxy(Id, FabricPid) ->
 	Token2 = "",
 	{ProxyPid, MonitorRef} = spawn_opt(fun() -> enter_proxy_loop(FabricPid, Token2) end, [link, monitor]),
-%	io:format("Created proxy process ProxyPid=~p , MonitoRef=~p for remote process Id=~p in FabricPid=~p~n", [ProxyPid, MonitorRef, Id, FabricPid]),
+	?debug("Created proxy process ProxyPid=~p , MonitoRef=~p for remote process Id=~p in FabricPid=~p~n", [ProxyPid, MonitorRef, Id, FabricPid]),
 	put({monitor, MonitorRef}, {remote, Id}),
 	put({pid_to_id1, ProxyPid}, {remote, Id}),
 	put({id_to_pid1, {pr, Id}}, {remote, ProxyPid}),
@@ -557,11 +578,11 @@ proxy_loop(FabricPid, Token) ->
 					% but also in case of recconect, where
 					% we still want to have proxies to be alive (as it can be referenced by some local processes)
 					% but new Fabric process was started
-					io:format("Reentering proxy_loop using fqdn for code update~n"),
+					?debug("Reentering proxy_loop using fqdn for code update~n", []),
 					?MODULE:proxy_code_update(NewFabricPid, NewToken)
 			end;
 		Msg ->
-%			io:format("Proxy ~p received ~p - forwarding~n", [self(), Msg]),
+			?debug("Proxy ~p received ~p - forwarding~n", [self(), Msg]),
 			FabricPid ! {forward, self(), Token, Msg},
 			proxy_loop(FabricPid, Token)
 		after 1100 ->
